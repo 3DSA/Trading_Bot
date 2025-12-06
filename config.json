@@ -1,0 +1,40 @@
+{
+  "symbol": "TQQQ",
+  "buy_enabled": true,
+  "buy_rsi_threshold": 30,
+  "stop_loss_pct": 0.02,
+  "dampening_factor": 0.1,
+  "last_update": "2025-12-05T13:14:41.143378",
+  "inverse_symbol": "SQQQ",
+  "qqq_symbol": "QQQ",
+  "active_strategy": "mean_reversion",
+  "data_source": "IEX",
+  "strategy": {
+    "type": "STRATEGY_ROUTER",
+    "use_double_lock": true,
+    "double_lock_leveraged_adx": 30,
+    "double_lock_underlying_adx": 25,
+    "adx_period": 14,
+    "adx_threshold": 25,
+    "adx_exit_threshold": 20,
+    "ema_fast": 9,
+    "ema_slow": 21,
+    "vwap_reset_freq": "daily",
+    "vol_spike_threshold": 1.5,
+    "min_volume": 1000,
+    "time_filters": {
+      "morning_start": "09:30",
+      "lunch_start": "11:45",
+      "lunch_end": "13:15",
+      "day_end": "15:55"
+    }
+  },
+  "risk_management": {
+    "stop_loss_pct": 0.008,
+    "take_profit_pct": 0.02,
+    "use_trailing_stop": true,
+    "trailing_stop_pct": 0.005,
+    "max_daily_loss_pct": 0.02,
+    "cooldown_minutes": 15
+  }
+}
