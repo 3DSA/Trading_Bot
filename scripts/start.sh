@@ -14,9 +14,10 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Get script directory (works even if called from elsewhere)
+# Get script directory and move to project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
 
 echo -e "${YELLOW}=================================================${NC}"
 echo -e "${YELLOW}   BI-CAMERAL TRADING BOT - TICK-TOCK SCHEDULER  ${NC}"

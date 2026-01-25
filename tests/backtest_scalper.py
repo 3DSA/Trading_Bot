@@ -27,7 +27,7 @@ import pandas as pd
 import yfinance as yf
 
 # Configuration
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent  # Go up from tests/ to project root
 CONFIG_PATH = BASE_DIR / "config.json"
 
 

@@ -1,5 +1,6 @@
 alpaca-py>=0.32.0
 numpy>=2.0.0
+pandas>=2.0.0
 python-dotenv>=1.0.0
 playwright>=1.40.0
 google-generativeai>=0.8.0

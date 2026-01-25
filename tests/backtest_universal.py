@@ -16,10 +16,14 @@ Author: Bi-Cameral System
 
 import argparse
 import os
+import sys
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Optional, List
 from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import numpy as np
@@ -90,7 +94,7 @@ class UniversalBacktester:
     This ensures that what you test is EXACTLY what trades live.
     """
 
-    BASE_DIR = Path(__file__).parent
+    BASE_DIR = Path(__file__).parent.parent  # Go up from tests/ to project root
 
     # Position sizing (same as reflex.py)
     POSITION_SIZE_MAP = {
