@@ -22,7 +22,7 @@ Author: Bi-Cameral Quant Team
 from typing import Optional
 import pandas as pd
 
-from strategies.base import (
+from deprecated.strategies.base import (
     BaseStrategy,
     StrategySignal,
     StrategyConfig,

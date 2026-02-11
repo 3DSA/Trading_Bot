@@ -11,6 +11,7 @@ DO NOT use stock strategies to trade options. Different physics.
 Strategies:
     - GammaScalper: Captures explosive moves (replaces momentum)
     - VegaSnap: Captures panic reversals (replaces mean reversion)
+    - DeltaSurfer: Rides steady trends with deep ITM options
 
 Usage:
     from strategies.options import get_option_strategy, GammaScalperStrategy
@@ -38,6 +39,7 @@ from strategies.options.base_options import (
 )
 from strategies.options.gamma_scalper import GammaScalperStrategy
 from strategies.options.vega_snap import VegaSnapStrategy
+from strategies.options.delta_surfer import DeltaSurferStrategy
 from strategies.options.factory import (
     get_option_strategy,
     get_option_strategy_for_condition,
@@ -60,6 +62,7 @@ __all__ = [
     # Strategies
     "GammaScalperStrategy",
     "VegaSnapStrategy",
+    "DeltaSurferStrategy",
     # Factory functions
     "get_option_strategy",
     "get_option_strategy_for_condition",

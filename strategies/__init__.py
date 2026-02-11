@@ -1,30 +1,77 @@
 """
-Bi-Cameral Trading Bot - Strategy Library
+Options-Native Strategy Library
 
-A modular, professional-grade quantitative strategy library using the Strategy Pattern.
-Each strategy is a "cartridge" that can be hot-swapped by the AI Manager based on market regime.
+The trading bot now focuses EXCLUSIVELY on options trading.
+Legacy equity strategies have been moved to deprecated/strategies/.
 
-Strategies:
-    - MomentumScalper: EMA + VWAP trend following with Double-Lock ADX filter
-    - MeanReversion: Bollinger + Z-Score rubber band in chop markets
-    - VolatilityBreakout: Opening Range Breakout for morning momentum
-    - CrisisAlpha: VIX-weighted trend following for SQQQ
+Options Strategies:
+    - GammaScalper: Captures explosive moves with ATM calls (high Gamma)
+    - VegaSnap: Captures panic reversals at market bottoms
+    - DeltaSurfer: Rides steady trends with deep ITM options
 
 Usage:
-    from strategies import get_strategy
+    from strategies.options import get_option_strategy, GammaScalperStrategy
 
-    strategy = get_strategy("momentum_scalper")
-    signal = strategy.generate_signal(df, config)
+    # Get strategy by name
+    gamma = get_option_strategy("gamma_scalper")
+    signal = gamma.generate_signal(df, vix_value=25)
+
+For legacy equity strategies, see deprecated/strategies/
 """
 
-from strategies.factory import get_strategy, list_strategies
-from strategies.base import BaseStrategy, StrategySignal
+# Only export options strategies (active)
+from strategies.options import (
+    # Base classes
+    BaseOptionStrategy,
+    OptionSignal,
+    OptionSignalType,
+    ContractSpec,
+    OptionType,
+    ContractSelection,
+    OptionPosition,
+    # Strategies
+    GammaScalperStrategy,
+    VegaSnapStrategy,
+    DeltaSurferStrategy,
+    # Factory functions
+    get_option_strategy,
+    get_option_strategy_for_condition,
+    list_option_strategies,
+    get_option_strategy_info,
+    select_option_strategy,
+    OptionStrategyManager,
+    create_option_strategy_manager,
+)
+
+# Shared utilities (used by both options and legacy)
+from strategies.shared_utils import calc_adx, calc_atr, calc_ema, calc_rsi
 
 __all__ = [
-    "get_strategy",
-    "list_strategies",
-    "BaseStrategy",
-    "StrategySignal",
+    # Base classes
+    "BaseOptionStrategy",
+    "OptionSignal",
+    "OptionSignalType",
+    "ContractSpec",
+    "OptionType",
+    "ContractSelection",
+    "OptionPosition",
+    # Strategies
+    "GammaScalperStrategy",
+    "VegaSnapStrategy",
+    "DeltaSurferStrategy",
+    # Factory functions
+    "get_option_strategy",
+    "get_option_strategy_for_condition",
+    "list_option_strategies",
+    "get_option_strategy_info",
+    "select_option_strategy",
+    "OptionStrategyManager",
+    "create_option_strategy_manager",
+    # Utilities
+    "calc_adx",
+    "calc_atr",
+    "calc_ema",
+    "calc_rsi",
 ]
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"  # Options-native version

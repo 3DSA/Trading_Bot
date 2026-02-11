@@ -24,6 +24,7 @@ import logging
 from strategies.options.base_options import BaseOptionStrategy
 from strategies.options.gamma_scalper import GammaScalperStrategy
 from strategies.options.vega_snap import VegaSnapStrategy
+from strategies.options.delta_surfer import DeltaSurferStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -32,21 +33,26 @@ logger = logging.getLogger(__name__)
 OPTION_STRATEGY_REGISTRY: Dict[str, Type[BaseOptionStrategy]] = {
     "gamma_scalper": GammaScalperStrategy,
     "vega_snap": VegaSnapStrategy,
+    "delta_surfer": DeltaSurferStrategy,
     # Aliases
     "gamma": GammaScalperStrategy,
     "explosion": GammaScalperStrategy,
     "snap": VegaSnapStrategy,
     "panic": VegaSnapStrategy,
+    "surfer": DeltaSurferStrategy,
+    "trend": DeltaSurferStrategy,
 }
 
 # Mapping of market conditions to strategies
 # Unlike stocks where ADX determines regime, options care about:
 # - Volatility (VIX) for strategy selection
 # - Speed of moves for timing
+# - Trend strength (ADX) for sustained moves
 CONDITION_STRATEGY_MAP: Dict[str, str] = {
     "EXPLOSIVE": "gamma_scalper",    # Fast moves, any direction
     "PANIC": "vega_snap",            # Crash + VIX spike
-    "NORMAL": "gamma_scalper",       # Default to gamma
+    "TRENDING": "delta_surfer",      # Steady trend (ADX > 25, low velocity)
+    "NORMAL": "gamma_scalper",       # Default - wait for explosions
 }
 
 
@@ -118,7 +124,7 @@ def list_option_strategies() -> List[str]:
     Returns:
         List of strategy names (excluding aliases)
     """
-    return ["gamma_scalper", "vega_snap"]
+    return ["gamma_scalper", "vega_snap", "delta_surfer"]
 
 
 def get_option_strategy_info(name: str) -> dict:
@@ -148,6 +154,7 @@ def select_option_strategy(
     vix_value: float,
     price_velocity: float,
     zscore: float,
+    adx_value: float = 20.0,
 ) -> str:
     """
     Intelligent strategy selection based on market conditions.
@@ -155,25 +162,41 @@ def select_option_strategy(
     This is the "brain" that decides which options strategy to use
     based on current market state.
 
+    Priority Order:
+    1. PANIC: Z-Score < -2.5 + VIX elevated -> Vega Snap (rare, high conviction)
+    2. EXPLOSIVE: Velocity > 0.3% -> Gamma Scalper (catch the move)
+    3. TRENDING: ADX > 25 + low velocity -> Delta Surfer (ride the trend)
+    4. DEFAULT: Sleep (wait for opportunity)
+
     Args:
         vix_value: Current VIX level
         price_velocity: Recent price velocity (1-min move %)
         zscore: Current Z-Score of price
+        adx_value: Current ADX value (trend strength)
 
     Returns:
         Name of recommended strategy
     """
-    # PANIC CONDITIONS: VIX high + extreme price drop
+    # PRIORITY 1: PANIC CONDITIONS (highest priority - rare but profitable)
+    # VIX high + extreme price drop = panic reversal opportunity
     if vix_value >= 22 and zscore < -2.5:
         logger.info(f"PANIC detected: VIX={vix_value}, Z={zscore} -> vega_snap")
         return "vega_snap"
 
-    # EXPLOSIVE CONDITIONS: Fast move with volume
+    # PRIORITY 2: EXPLOSIVE CONDITIONS (quick scalp)
+    # Fast move = Gamma Scalper's territory
     if abs(price_velocity) >= 0.003:  # 0.3% in 1 minute
         logger.info(f"EXPLOSION detected: velocity={price_velocity*100:.2f}% -> gamma_scalper")
         return "gamma_scalper"
 
-    # DEFAULT: Gamma scalper (wait for explosions)
+    # PRIORITY 3: TRENDING CONDITIONS (new - captures steady moves)
+    # Strong trend + low velocity = Delta Surfer's territory
+    # Tighter threshold: ADX >= 28 for quality trends only
+    if adx_value >= 28 and abs(price_velocity) < 0.002:  # Strong trend but not explosive
+        logger.info(f"TREND detected: ADX={adx_value}, velocity={price_velocity*100:.2f}% -> delta_surfer")
+        return "delta_surfer"
+
+    # DEFAULT: Wait for opportunity (Gamma Scalper in waiting mode)
     return "gamma_scalper"
 
 
@@ -211,6 +234,7 @@ class OptionStrategyManager:
         vix_value: float,
         price_velocity: float,
         zscore: float,
+        adx_value: float = 20.0,
     ) -> BaseOptionStrategy:
         """
         Select the optimal strategy based on conditions.
@@ -219,15 +243,18 @@ class OptionStrategyManager:
             vix_value: Current VIX level
             price_velocity: Recent price velocity
             zscore: Current Z-Score
+            adx_value: Current ADX value
 
         Returns:
             The selected strategy
         """
-        strategy_name = select_option_strategy(vix_value, price_velocity, zscore)
+        strategy_name = select_option_strategy(vix_value, price_velocity, zscore, adx_value)
 
         # Determine condition for logging
         if strategy_name == "vega_snap":
             new_condition = "PANIC"
+        elif strategy_name == "delta_surfer":
+            new_condition = "TRENDING"
         elif abs(price_velocity) >= 0.003:
             new_condition = "EXPLOSIVE"
         else:

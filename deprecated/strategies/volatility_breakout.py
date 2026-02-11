@@ -24,7 +24,7 @@ from datetime import time as dt_time
 import pandas as pd
 import numpy as np
 
-from strategies.base import (
+from deprecated.strategies.base import (
     BaseStrategy,
     StrategySignal,
     StrategyConfig,

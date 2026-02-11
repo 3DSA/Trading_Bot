@@ -23,13 +23,13 @@ Author: Bi-Cameral Quant Team
 from typing import Dict, List, Optional, Type
 import logging
 
-from strategies.base import BaseStrategy, StrategyConfig
+from deprecated.strategies.base import BaseStrategy, StrategyConfig
 
 # Import all strategy classes
-from strategies.momentum_scalper import MomentumScalperStrategy
-from strategies.mean_reversion import MeanReversionStrategy
-from strategies.volatility_breakout import VolatilityBreakoutStrategy
-from strategies.crisis_alpha import CrisisAlphaStrategy
+from deprecated.strategies.momentum_scalper import MomentumScalperStrategy
+from deprecated.strategies.mean_reversion import MeanReversionStrategy
+from deprecated.strategies.volatility_breakout import VolatilityBreakoutStrategy
+from deprecated.strategies.crisis_alpha import CrisisAlphaStrategy
 
 logger = logging.getLogger(__name__)
 

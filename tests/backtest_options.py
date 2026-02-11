@@ -5,13 +5,14 @@ Options-Native Strategy Backtester with Brain Switching
 This is the ONLY backtester for the trading bot. We trade OPTIONS ONLY.
 The "brain" switches between strategies based on market conditions:
 
-    - GAMMA SCALPER: When explosive moves detected (high velocity)
-    - VEGA SNAP: When panic conditions detected (VIX spike + price crash)
+    - VEGA SNAP: When panic conditions detected (VIX spike + price crash) [Priority 1]
+    - GAMMA SCALPER: When explosive moves detected (high velocity) [Priority 2]
+    - DELTA SURFER: When steady trends detected (ADX > 25, low velocity) [Priority 3]
 
 Key Features:
 1. TIME STOPS ARE ENFORCED - Every bar, we check time held
 2. GREEKS-BASED P&L - Simulates Delta, Gamma, Theta effects
-3. SHORT HOLD TIMES - Minutes, not hours
+3. SHORT HOLD TIMES - Minutes, not hours (except Delta Surfer)
 4. BRAIN SWITCHING - Automatically selects best strategy
 
 Usage:
@@ -50,6 +51,7 @@ from strategies.options import (
     OptionStrategyManager,
     GammaScalperStrategy,
     VegaSnapStrategy,
+    DeltaSurferStrategy,
     OptionSignalType,
     OptionPosition,
     OptionType,
@@ -137,14 +139,15 @@ class OptionsBacktester:
     Options-Native Backtester with Brain Switching.
 
     The brain evaluates each bar and decides:
-    1. Which strategy to use (Gamma Scalper vs Vega Snap)
+    1. Which strategy to use (Vega Snap vs Gamma Scalper vs Delta Surfer)
     2. Whether to enter a trade
     3. Whether to exit current position
 
-    Strategy Selection Logic:
-    - VIX >= 22 AND Z-Score < -2.5 -> VEGA SNAP (panic mode)
-    - Velocity >= 0.4% in 1 min -> GAMMA SCALPER (explosion mode)
-    - Default -> GAMMA SCALPER (wait for explosions)
+    Strategy Selection Priority:
+    1. VIX >= 22 AND Z-Score < -2.5 -> VEGA SNAP (panic mode)
+    2. Velocity >= 0.3% in 1 min -> GAMMA SCALPER (explosion mode)
+    3. ADX >= 25 AND Velocity < 0.2% -> DELTA SURFER (trend mode)
+    4. Default -> GAMMA SCALPER (wait for explosions)
     """
 
     BASE_DIR = Path(__file__).parent.parent
@@ -192,6 +195,7 @@ class OptionsBacktester:
             self.strategies = {
                 "gamma_scalper": get_option_strategy("gamma_scalper"),
                 "vega_snap": get_option_strategy("vega_snap"),
+                "delta_surfer": get_option_strategy("delta_surfer"),
             }
             self.current_strategy_name = "gamma_scalper"
             print(f"[INIT] Options Brain Backtester")
@@ -205,12 +209,22 @@ class OptionsBacktester:
         print(f"[INIT] Simulated VIX: {vix_simulated}")
         print(f"[INIT] Position Size: ${position_size}")
 
-    def fetch_data(self, days: int) -> pd.DataFrame:
-        """Fetch QQQ minute data."""
-        end = datetime.now()
-        start = end - timedelta(days=days)
+    def fetch_data(self, days: int, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        """Fetch QQQ minute data.
 
-        print(f"\n[DATA] Fetching {days} days of QQQ minute data...")
+        Args:
+            days: Number of days of data (used if start_date/end_date not provided)
+            start_date: Optional start date string (YYYY-MM-DD)
+            end_date: Optional end date string (YYYY-MM-DD)
+        """
+        if start_date and end_date:
+            start = datetime.strptime(start_date, "%Y-%m-%d")
+            end = datetime.strptime(end_date, "%Y-%m-%d")
+            print(f"\n[DATA] Fetching QQQ data from {start_date} to {end_date}...")
+        else:
+            end = datetime.now()
+            start = end - timedelta(days=days)
+            print(f"\n[DATA] Fetching {days} days of QQQ minute data...")
 
         request = StockBarsRequest(
             symbol_or_symbols=["QQQ"],
@@ -254,24 +268,39 @@ class OptionsBacktester:
 
         return df
 
-    def _select_strategy(self, velocity: float, zscore: float, vix: float) -> str:
+    def _select_strategy(self, velocity: float, zscore: float, vix: float, adx: float = 20.0) -> str:
         """
         Brain logic: Select the best strategy for current conditions.
+
+        Priority Order:
+        1. PANIC: Z-Score < -2.5 + VIX elevated -> Vega Snap (rare, high conviction)
+        2. EXPLOSIVE: Velocity > 0.3% -> Gamma Scalper (catch the move)
+        3. TRENDING: ADX > 25 + low velocity -> Delta Surfer (ride the trend)
+        4. DEFAULT: Gamma Scalper (wait for opportunity)
 
         Args:
             velocity: Current 1-bar price velocity
             zscore: Current Z-Score
             vix: Current VIX level
+            adx: Current ADX value (trend strength)
 
         Returns:
             Strategy name to use
         """
-        # PANIC CONDITIONS -> Vega Snap
+        # PRIORITY 1: PANIC CONDITIONS -> Vega Snap
         if vix >= 22 and zscore < -2.5:
             return "vega_snap"
 
-        # EXPLOSIVE CONDITIONS -> Gamma Scalper
-        # (The strategy itself will decide if it's explosive enough to enter)
+        # PRIORITY 2: EXPLOSIVE CONDITIONS -> Gamma Scalper
+        if abs(velocity) >= 0.003:  # 0.3% in 1 minute
+            return "gamma_scalper"
+
+        # PRIORITY 3: TRENDING CONDITIONS -> Delta Surfer
+        # Tighter: ADX >= 28 to match strategy's entry threshold
+        if adx >= 28 and abs(velocity) < 0.002:  # Strong trend but not explosive
+            return "delta_surfer"
+
+        # DEFAULT: Gamma Scalper (waiting for explosions)
         return "gamma_scalper"
 
     def simulate_option_pnl(
@@ -306,9 +335,10 @@ class OptionsBacktester:
         new_premium = entry_premium + delta_pnl + gamma_pnl - theta_decay
         return max(0.01, new_premium)
 
-    def run(self, days: int = 30, warmup_bars: int = 30, verbose: bool = False) -> OptionsBacktestResult:
+    def run(self, days: int = 30, warmup_bars: int = 30, verbose: bool = False,
+            start_date: Optional[str] = None, end_date: Optional[str] = None) -> OptionsBacktestResult:
         """Run the options backtest."""
-        df = self.fetch_data(days)
+        df = self.fetch_data(days, start_date=start_date, end_date=end_date)
 
         if df.empty or len(df) < warmup_bars:
             raise ValueError("Insufficient data for backtest")
@@ -341,8 +371,8 @@ class OptionsBacktester:
         )
 
         if self.brain_mode:
-            result.strategy_distribution = {"gamma_scalper": 0, "vega_snap": 0}
-            result.strategy_pnl = {"gamma_scalper": 0.0, "vega_snap": 0.0}
+            result.strategy_distribution = {"gamma_scalper": 0, "vega_snap": 0, "delta_surfer": 0}
+            result.strategy_pnl = {"gamma_scalper": 0.0, "vega_snap": 0.0, "delta_surfer": 0.0}
 
         # Simulation state
         capital = self.initial_capital
@@ -370,11 +400,21 @@ class OptionsBacktester:
             # Get market indicators for brain decisions
             velocity = current_row.get("velocity", 0)
             zscore = current_row.get("zscore", 0) if "zscore" in current_row else 0
+            adx = current_row.get("adx", 20.0) if "adx" in current_row else 20.0
 
             # If no zscore in gamma_scalper, calculate from vega_snap data
             if self.brain_mode and "zscore" not in current_row:
-                vega_row = prepared_data["vega_snap"].iloc[i]
-                zscore = vega_row.get("zscore", 0)
+                vega_df = prepared_data["vega_snap"]
+                if i < len(vega_df):
+                    vega_row = vega_df.iloc[i]
+                    zscore = vega_row.get("zscore", 0)
+
+            # If no adx in current data, calculate from delta_surfer data
+            if self.brain_mode and "adx" not in current_row:
+                surfer_df = prepared_data["delta_surfer"]
+                if i < len(surfer_df):
+                    surfer_row = surfer_df.iloc[i]
+                    adx = surfer_row.get("adx", 20.0)
 
             # BRAIN: Select strategy for this bar
             if self.brain_mode:
@@ -382,6 +422,7 @@ class OptionsBacktester:
                     velocity=velocity,
                     zscore=zscore,
                     vix=self.vix_simulated,
+                    adx=adx,
                 )
 
                 # Track strategy switches
@@ -638,13 +679,14 @@ class OptionsBacktester:
             print("\n" + "-" * 70)
             print("  PER-STRATEGY PERFORMANCE")
             print("-" * 70)
-            for strat_name in ["gamma_scalper", "vega_snap"]:
+            for strat_name in ["gamma_scalper", "vega_snap", "delta_surfer"]:
                 strat_trades = [t for t in result.trades if t.strategy_name == strat_name]
                 if strat_trades:
                     strat_wins = len([t for t in strat_trades if t.pnl > 0])
                     strat_pnl = sum(t.pnl for t in strat_trades)
                     strat_wr = strat_wins / len(strat_trades) * 100
-                    print(f"  {strat_name:20} {len(strat_trades):3} trades | ${strat_pnl:+8,.2f} | {strat_wr:5.1f}% WR")
+                    avg_hold = sum(t.hold_minutes for t in strat_trades) / len(strat_trades)
+                    print(f"  {strat_name:20} {len(strat_trades):3} trades | ${strat_pnl:+8,.2f} | {strat_wr:5.1f}% WR | {avg_hold:.0f}min avg")
 
         # Trade log
         if result.trades:
@@ -683,9 +725,11 @@ class OptionsBacktester:
 
 def main():
     parser = argparse.ArgumentParser(description="Options Brain Backtester")
-    parser.add_argument("--days", type=int, default=30, help="Days of history")
+    parser.add_argument("--days", type=int, default=30, help="Days of history (ignored if --start/--end provided)")
+    parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD)")
     parser.add_argument("--strategy", type=str, default=None,
-                        choices=["gamma_scalper", "vega_snap"],
+                        choices=["gamma_scalper", "vega_snap", "delta_surfer"],
                         help="Single strategy mode (omit for brain mode)")
     parser.add_argument("--vix", type=float, default=20.0,
                         help="Simulated VIX level")
@@ -707,7 +751,8 @@ def main():
         vix_simulated=args.vix,
         initial_capital=args.capital,
     )
-    result = bt.run(days=args.days, verbose=args.verbose)
+    result = bt.run(days=args.days, verbose=args.verbose,
+                    start_date=args.start, end_date=args.end)
     bt.print_report(result)
 
 
