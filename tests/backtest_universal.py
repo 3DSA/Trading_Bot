@@ -284,18 +284,31 @@ class UniversalBacktester:
         peak_equity = capital
         max_drawdown = 0.0
 
+        # OPTIMIZATION: Pre-calculate all indicators ONCE on full dataset
+        print(f"[BACKTEST] Pre-calculating indicators...")
+        prepared_symbol_df = self.strategy.prepare_data(symbol_df.copy())
+        prepared_underlying_df = self.strategy.prepare_data(underlying_df.copy())
+        print(f"[BACKTEST] Running simulation loop...")
+
+        # Progress tracking
+        total_iterations = len(symbol_df) - warmup_bars
+        last_pct = 0
+
         # Run simulation
         for i in range(warmup_bars, len(symbol_df)):
-            # Slice data up to current bar (simulating live stream)
-            current_symbol_df = symbol_df.iloc[:i+1].copy()
-            current_underlying_df = underlying_df.iloc[:i+1].copy()
+            # Progress indicator (every 10%)
+            pct = int((i - warmup_bars) / total_iterations * 100)
+            if pct >= last_pct + 10:
+                print(f"[BACKTEST] Progress: {pct}%")
+                last_pct = pct
 
             current_bar = symbol_df.iloc[i]
             current_time = symbol_df.index[i]
             current_price = current_bar["Close"]
 
-            # Prepare data with strategy-specific indicators
-            prepared_df = self.strategy.prepare_data(current_symbol_df)
+            # Use pre-calculated data sliced to current bar (no recalculation)
+            current_symbol_df = prepared_symbol_df.iloc[:i+1]
+            current_underlying_df = prepared_underlying_df.iloc[:i+1]
 
             # Build position dict for strategy
             current_position = None
@@ -307,9 +320,9 @@ class UniversalBacktester:
                     "highest_price": current_price,  # Simplified
                 }
 
-            # Generate signal from strategy
+            # Generate signal from strategy (using pre-calculated indicators)
             signal = self.strategy.generate_signal(
-                prepared_df,
+                current_symbol_df,
                 current_position=current_position,
                 underlying_df=current_underlying_df
             )

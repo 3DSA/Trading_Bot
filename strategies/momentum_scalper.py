@@ -73,10 +73,16 @@ class MomentumScalperStrategy(BaseStrategy):
     EMA_FAST = 9
     EMA_SLOW = 21
     VOLUME_SPIKE_THRESHOLD = 2.0
-    ATR_STOP_MULTIPLIER = 1.5
-    ATR_TP_MULTIPLIER = 3.0  # 2:1 risk/reward
+    ATR_STOP_MULTIPLIER = 2.0  # Wider stop to avoid noise
+    ATR_TP_MULTIPLIER = 6.0  # Increased from 3.0 - let winners run
     ATR_TRAILING_MULTIPLIER = 0.5
     RSI_OVERBOUGHT = 80  # Don't buy if already overbought
+
+    # Exit tuning parameters
+    ADX_EXIT_THRESHOLD = 18  # Lower than entry (was 20) - give trades room
+    MIN_BARS_BEFORE_DI_EXIT = 5  # Don't exit on DI crossover too quickly
+    MIN_PROFIT_FOR_DI_EXIT = 0.005  # 0.5% min profit before DI exit allowed
+    MIN_PROFIT_FOR_TP = 0.008  # 0.8% minimum take profit (don't exit for tiny gains)
 
     def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add all indicators needed for the strategy."""
@@ -248,22 +254,55 @@ class MomentumScalperStrategy(BaseStrategy):
     ) -> StrategySignal:
         """Check if exit conditions are met for current position."""
         entry_price = position.get("entry_price", current["Close"])
+        entry_time = position.get("entry_time")
         current_price = current["Close"]
+        current_time = current.name
         atr = current["atr"]
 
         pnl_pct = (current_price - entry_price) / entry_price
 
-        # Exit condition 1: ADX Collapse (trend dying)
-        if current["adx"] < 20:
+        # Calculate bars held (approximate)
+        bars_held = 0
+        if entry_time is not None:
+            try:
+                time_diff = (current_time - entry_time).total_seconds() / 60  # minutes
+                bars_held = int(time_diff)
+            except:
+                bars_held = 10  # Default assumption
+
+        # Exit condition 0: Take Profit (ATR-based) - let winners run!
+        # Use MAX of ATR-based target OR minimum profit threshold
+        atr_tp_distance = atr * self.ATR_TP_MULTIPLIER / entry_price
+        tp_target = max(atr_tp_distance, self.MIN_PROFIT_FOR_TP)
+        if pnl_pct >= tp_target:
             return StrategySignal(
                 signal=SignalType.EXIT,
-                reason=f"ADX Collapse: {current['adx']:.1f} < 20",
+                reason=f"Take Profit: +{pnl_pct*100:.2f}% >= {tp_target*100:.2f}% target",
+                confidence=0.95,
+                metadata={"exit_reason": "TAKE_PROFIT", "pnl_pct": pnl_pct}
+            )
+
+        # Exit condition 1: Stop Loss (hard stop)
+        atr_sl_distance = atr * self.ATR_STOP_MULTIPLIER / entry_price
+        if pnl_pct <= -atr_sl_distance:
+            return StrategySignal(
+                signal=SignalType.EXIT,
+                reason=f"Stop Loss: {pnl_pct*100:.2f}% <= -{atr_sl_distance*100:.2f}%",
+                confidence=0.95,
+                metadata={"exit_reason": "STOP_LOSS", "pnl_pct": pnl_pct}
+            )
+
+        # Exit condition 2: ADX Collapse (trend dying) - use lower threshold
+        if current["adx"] < self.ADX_EXIT_THRESHOLD:
+            return StrategySignal(
+                signal=SignalType.EXIT,
+                reason=f"ADX Collapse: {current['adx']:.1f} < {self.ADX_EXIT_THRESHOLD}",
                 confidence=0.9,
                 metadata={"exit_reason": "ADX_COLLAPSE", "pnl_pct": pnl_pct}
             )
 
-        # Exit condition 2: Trend Break (EMA crossover bearish)
-        if current["ema_fast"] < current["ema_slow"]:
+        # Exit condition 3: Trend Break (EMA crossover bearish) - only if losing
+        if current["ema_fast"] < current["ema_slow"] and pnl_pct < 0:
             return StrategySignal(
                 signal=SignalType.EXIT,
                 reason=f"Trend Break: EMA{self.EMA_FAST} < EMA{self.EMA_SLOW}",
@@ -271,14 +310,16 @@ class MomentumScalperStrategy(BaseStrategy):
                 metadata={"exit_reason": "TREND_BREAK", "pnl_pct": pnl_pct}
             )
 
-        # Exit condition 3: -DI crosses above +DI (bearish takeover)
-        if current["-di"] > current["+di"] and pnl_pct > 0:
-            return StrategySignal(
-                signal=SignalType.EXIT,
-                reason=f"Bearish DI Crossover: -DI={current['-di']:.1f} > +DI={current['+di']:.1f}",
-                confidence=0.75,
-                metadata={"exit_reason": "DI_CROSSOVER", "pnl_pct": pnl_pct}
-            )
+        # Exit condition 4: -DI crosses above +DI (bearish takeover)
+        # Only exit if: enough bars held AND enough profit locked in
+        if current["-di"] > current["+di"]:
+            if bars_held >= self.MIN_BARS_BEFORE_DI_EXIT and pnl_pct >= self.MIN_PROFIT_FOR_DI_EXIT:
+                return StrategySignal(
+                    signal=SignalType.EXIT,
+                    reason=f"Bearish DI Crossover: -DI={current['-di']:.1f} > +DI={current['+di']:.1f}",
+                    confidence=0.75,
+                    metadata={"exit_reason": "DI_CROSSOVER", "pnl_pct": pnl_pct}
+                )
 
         # Hold position
         return StrategySignal(
@@ -289,6 +330,7 @@ class MomentumScalperStrategy(BaseStrategy):
                 "adx": current["adx"],
                 "ema_fast": current["ema_fast"],
                 "ema_slow": current["ema_slow"],
+                "bars_held": bars_held,
             }
         )
 
