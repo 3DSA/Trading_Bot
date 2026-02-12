@@ -45,3 +45,4 @@ build/
 *.tmp
 *.bak
 config.tmp
+results

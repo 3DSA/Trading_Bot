@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import numpy as np
+import yfinance as yf
 from dotenv import load_dotenv
 
 from alpaca.data.historical import StockHistoricalDataClient
@@ -107,7 +108,8 @@ class OptionsBacktestResult:
     end_date: datetime
     total_bars: int
     mode: str  # "brain" or single strategy name
-    vix_simulated: float
+    vix_mode: str  # "real" or "simulated"
+    vix_stats: Dict = field(default_factory=dict)  # min, max, mean, elevated_days
 
     trades: List[OptionTrade] = field(default_factory=list)
 
@@ -158,7 +160,8 @@ class OptionsBacktester:
     def __init__(
         self,
         strategy_name: Optional[str] = None,  # None = brain mode
-        vix_simulated: float = 20.0,
+        use_real_vix: bool = True,
+        vix_fallback: float = 20.0,
         initial_capital: float = 10000,
         position_size: float = 1000,
     ):
@@ -167,7 +170,8 @@ class OptionsBacktester:
 
         Args:
             strategy_name: Single strategy to test, or None for brain mode
-            vix_simulated: Simulated VIX level
+            use_real_vix: If True, fetch real VIX data from Yahoo Finance
+            vix_fallback: Fallback VIX level if real data unavailable
             initial_capital: Starting capital
             position_size: $ per trade
         """
@@ -186,7 +190,9 @@ class OptionsBacktester:
 
         self.strategy_name = strategy_name
         self.brain_mode = strategy_name is None
-        self.vix_simulated = vix_simulated
+        self.use_real_vix = use_real_vix
+        self.vix_fallback = vix_fallback
+        self.vix_data = None  # Will be populated with real VIX data
         self.initial_capital = initial_capital
         self.position_size = position_size
 
@@ -206,7 +212,7 @@ class OptionsBacktester:
             print(f"[INIT] Options Single Strategy Backtester")
             print(f"[INIT] Strategy: {self.strategy.name} v{self.strategy.version}")
 
-        print(f"[INIT] Simulated VIX: {vix_simulated}")
+        print(f"[INIT] VIX Mode: {'REAL DATA' if use_real_vix else f'SIMULATED ({vix_fallback})'}")
         print(f"[INIT] Position Size: ${position_size}")
 
     def fetch_data(self, days: int, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
@@ -267,6 +273,92 @@ class OptionsBacktester:
             }, index=pd.DatetimeIndex([b.timestamp for b in bars]))
 
         return df
+
+    def fetch_vix_data(self, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """
+        Fetch real VIX historical data from Yahoo Finance.
+
+        Args:
+            start_date: Start date for VIX data
+            end_date: End date for VIX data
+
+        Returns:
+            DataFrame with VIX Close prices indexed by date
+        """
+        print(f"\n[VIX] Fetching real VIX data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}...")
+
+        # Add buffer days for market holidays
+        buffer_start = start_date - timedelta(days=5)
+        buffer_end = end_date + timedelta(days=1)
+
+        try:
+            vix = yf.download(
+                "^VIX",
+                start=buffer_start.strftime('%Y-%m-%d'),
+                end=buffer_end.strftime('%Y-%m-%d'),
+                progress=False,
+                auto_adjust=True
+            )
+
+            if vix.empty:
+                print(f"[VIX] WARNING: No VIX data available, using fallback value {self.vix_fallback}")
+                return pd.DataFrame()
+
+            # Handle multi-level columns from yfinance
+            if isinstance(vix.columns, pd.MultiIndex):
+                vix.columns = vix.columns.get_level_values(0)
+
+            # Keep only Close price
+            vix_close = vix[['Close']].copy()
+            vix_close.columns = ['VIX']
+
+            # Make index timezone-naive for easier merging
+            vix_close.index = vix_close.index.tz_localize(None)
+
+            print(f"[VIX] Fetched {len(vix_close)} days of VIX data")
+            print(f"[VIX] VIX Range: {vix_close['VIX'].min():.2f} - {vix_close['VIX'].max():.2f}")
+            print(f"[VIX] VIX Mean: {vix_close['VIX'].mean():.2f}")
+
+            # Count days with elevated VIX (>= 22)
+            elevated_days = (vix_close['VIX'] >= 22).sum()
+            print(f"[VIX] Days with VIX >= 22: {elevated_days} ({elevated_days/len(vix_close)*100:.1f}%)")
+
+            return vix_close
+
+        except Exception as e:
+            print(f"[VIX] ERROR fetching VIX data: {e}")
+            print(f"[VIX] Using fallback value {self.vix_fallback}")
+            return pd.DataFrame()
+
+    def get_vix_for_timestamp(self, timestamp: datetime) -> float:
+        """
+        Get VIX value for a specific timestamp.
+
+        Uses the VIX close from the same trading day.
+        Falls back to vix_fallback if no data available.
+
+        Args:
+            timestamp: The timestamp to get VIX for
+
+        Returns:
+            VIX value
+        """
+        if self.vix_data is None or self.vix_data.empty:
+            return self.vix_fallback
+
+        # Get date from timestamp (handling timezone)
+        if timestamp.tzinfo is not None:
+            date = timestamp.tz_localize(None).date()
+        else:
+            date = timestamp.date()
+
+        # Find the most recent VIX data on or before this date
+        matching_dates = self.vix_data.index[self.vix_data.index.date <= date]
+        if len(matching_dates) == 0:
+            return self.vix_fallback
+
+        closest_date = matching_dates[-1]
+        return float(self.vix_data.loc[closest_date, 'VIX'])
 
     def _select_strategy(self, velocity: float, zscore: float, vix: float, adx: float = 20.0) -> str:
         """
@@ -343,6 +435,26 @@ class OptionsBacktester:
         if df.empty or len(df) < warmup_bars:
             raise ValueError("Insufficient data for backtest")
 
+        # Fetch real VIX data if enabled
+        vix_stats = {}
+        if self.use_real_vix:
+            # Get date range from the data
+            data_start = df.index[0]
+            data_end = df.index[-1]
+            if data_start.tzinfo is not None:
+                data_start = data_start.tz_localize(None)
+                data_end = data_end.tz_localize(None)
+
+            self.vix_data = self.fetch_vix_data(data_start, data_end)
+            if not self.vix_data.empty:
+                vix_stats = {
+                    "min": float(self.vix_data['VIX'].min()),
+                    "max": float(self.vix_data['VIX'].max()),
+                    "mean": float(self.vix_data['VIX'].mean()),
+                    "elevated_days": int((self.vix_data['VIX'] >= 22).sum()),
+                    "total_days": len(self.vix_data),
+                }
+
         # Prepare data for all strategies
         print(f"\n[BACKTEST] Preparing indicators...")
 
@@ -362,12 +474,14 @@ class OptionsBacktester:
 
         # Initialize result
         mode = "brain" if self.brain_mode else self.strategy_name
+        vix_mode = "real" if (self.use_real_vix and self.vix_data is not None and not self.vix_data.empty) else "simulated"
         result = OptionsBacktestResult(
             start_date=prepared_df.index[warmup_bars],
             end_date=prepared_df.index[-1],
             total_bars=len(prepared_df) - warmup_bars,
             mode=mode,
-            vix_simulated=self.vix_simulated,
+            vix_mode=vix_mode,
+            vix_stats=vix_stats,
         )
 
         if self.brain_mode:
@@ -416,12 +530,15 @@ class OptionsBacktester:
                     surfer_row = surfer_df.iloc[i]
                     adx = surfer_row.get("adx", 20.0)
 
+            # Get current VIX value (real or fallback)
+            current_vix = self.get_vix_for_timestamp(current_time)
+
             # BRAIN: Select strategy for this bar
             if self.brain_mode:
                 current_strategy_name = self._select_strategy(
                     velocity=velocity,
                     zscore=zscore,
-                    vix=self.vix_simulated,
+                    vix=current_vix,
                     adx=adx,
                 )
 
@@ -443,7 +560,7 @@ class OptionsBacktester:
             signal = strategy.generate_signal(
                 current_data,
                 current_position=current_option_position,
-                vix_value=self.vix_simulated,
+                vix_value=current_vix,
             )
 
             # POSITION MANAGEMENT
@@ -538,7 +655,7 @@ class OptionsBacktester:
                             entry_reason=signal.reason,
                             entry_delta=contract.delta,
                             entry_gamma=contract.gamma,
-                            vix_at_entry=self.vix_simulated,
+                            vix_at_entry=current_vix,
                             velocity_at_entry=velocity,
                             zscore_at_entry=zscore,
                         )
@@ -640,7 +757,10 @@ class OptionsBacktester:
         print("=" * 70)
 
         print(f"\n  Mode: {result.mode.upper()}")
-        print(f"  Simulated VIX: {result.vix_simulated}")
+        print(f"  VIX Mode: {result.vix_mode.upper()}")
+        if result.vix_stats:
+            print(f"  VIX Range: {result.vix_stats['min']:.1f} - {result.vix_stats['max']:.1f} (Mean: {result.vix_stats['mean']:.1f})")
+            print(f"  VIX >= 22 Days: {result.vix_stats['elevated_days']} / {result.vix_stats['total_days']}")
         print(f"  Period: {result.start_date.strftime('%Y-%m-%d')} to {result.end_date.strftime('%Y-%m-%d')}")
         print(f"  Total Bars: {result.total_bars:,}")
 
@@ -731,8 +851,10 @@ def main():
     parser.add_argument("--strategy", type=str, default=None,
                         choices=["gamma_scalper", "vega_snap", "delta_surfer"],
                         help="Single strategy mode (omit for brain mode)")
-    parser.add_argument("--vix", type=float, default=20.0,
-                        help="Simulated VIX level")
+    parser.add_argument("--no-real-vix", action="store_true",
+                        help="Disable real VIX data (use simulated)")
+    parser.add_argument("--vix-fallback", type=float, default=20.0,
+                        help="Fallback VIX level if real data unavailable")
     parser.add_argument("--verbose", action="store_true", help="Show all trades")
     parser.add_argument("--capital", type=float, default=10000,
                         help="Starting capital")
@@ -745,10 +867,12 @@ def main():
     print("=" * 70)
     print(f"\n  Available strategies: {list_option_strategies()}")
     print(f"  Mode: {'BRAIN (auto-switch)' if args.strategy is None else args.strategy}")
+    print(f"  VIX: {'REAL DATA' if not args.no_real_vix else f'SIMULATED ({args.vix_fallback})'}")
 
     bt = OptionsBacktester(
         strategy_name=args.strategy,
-        vix_simulated=args.vix,
+        use_real_vix=not args.no_real_vix,
+        vix_fallback=args.vix_fallback,
         initial_capital=args.capital,
     )
     result = bt.run(days=args.days, verbose=args.verbose,
