@@ -21,10 +21,11 @@ Author: Bi-Cameral Quant Team
 from typing import Dict, List, Optional, Type
 import logging
 
-from strategies.options.base_options import BaseOptionStrategy
-from strategies.options.gamma_scalper import GammaScalperStrategy
-from strategies.options.vega_snap import VegaSnapStrategy
-from strategies.options.delta_surfer import DeltaSurferStrategy
+from strategies.options.core.base_options import BaseOptionStrategy
+from strategies.options.strategies.gamma.scalper import GammaScalperStrategy
+from strategies.options.strategies.gamma.reversal import ReversalScalperStrategy
+from strategies.options.strategies.vega_snap import VegaSnapStrategy
+from strategies.options.strategies.delta_surfer import DeltaSurferStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,14 @@ logger = logging.getLogger(__name__)
 # Registry of available options strategies
 OPTION_STRATEGY_REGISTRY: Dict[str, Type[BaseOptionStrategy]] = {
     "gamma_scalper": GammaScalperStrategy,
+    "reversal_scalper": ReversalScalperStrategy,
     "vega_snap": VegaSnapStrategy,
     "delta_surfer": DeltaSurferStrategy,
     # Aliases
     "gamma": GammaScalperStrategy,
     "explosion": GammaScalperStrategy,
+    "reversal": ReversalScalperStrategy,
+    "fade": ReversalScalperStrategy,
     "snap": VegaSnapStrategy,
     "panic": VegaSnapStrategy,
     "surfer": DeltaSurferStrategy,
@@ -124,7 +128,7 @@ def list_option_strategies() -> List[str]:
     Returns:
         List of strategy names (excluding aliases)
     """
-    return ["gamma_scalper", "vega_snap", "delta_surfer"]
+    return ["gamma_scalper", "reversal_scalper", "vega_snap", "delta_surfer"]
 
 
 def get_option_strategy_info(name: str) -> dict:
@@ -155,6 +159,8 @@ def select_option_strategy(
     price_velocity: float,
     zscore: float,
     adx_value: float = 20.0,
+    exhaustion_score: int = 0,
+    session_phase: str = "unknown",
 ) -> str:
     """
     Intelligent strategy selection based on market conditions.
@@ -164,15 +170,18 @@ def select_option_strategy(
 
     Priority Order:
     1. PANIC: Z-Score < -2.5 + VIX elevated -> Vega Snap (rare, high conviction)
-    2. EXPLOSIVE: Velocity > 0.3% -> Gamma Scalper (catch the move)
-    3. TRENDING: ADX > 25 + low velocity -> Delta Surfer (ride the trend)
-    4. DEFAULT: Sleep (wait for opportunity)
+    2. EXPLOSIVE + EXHAUSTED: Velocity > 0.3% + exhaustion triggers -> Reversal Scalper
+    3. EXPLOSIVE: Velocity > 0.3% -> Gamma Scalper (catch the move)
+    4. TRENDING: ADX > 25 + low velocity -> Delta Surfer (ride the trend)
+    5. DEFAULT: Sleep (wait for opportunity)
 
     Args:
         vix_value: Current VIX level
         price_velocity: Recent price velocity (1-min move %)
         zscore: Current Z-Score of price
         adx_value: Current ADX value (trend strength)
+        exhaustion_score: Composite exhaustion score (0-6)
+        session_phase: Current session phase (open_drive, midday, close_drive)
 
     Returns:
         Name of recommended strategy
@@ -183,11 +192,32 @@ def select_option_strategy(
         logger.info(f"PANIC detected: VIX={vix_value}, Z={zscore} -> vega_snap")
         return "vega_snap"
 
-    # PRIORITY 2: EXPLOSIVE CONDITIONS (quick scalp)
-    # Fast move = Gamma Scalper's territory
+    # PRIORITY 2: EXPLOSIVE CONDITIONS - check for exhaustion first
+    # Fast move = check if exhausted (reversal) or fresh (gamma scalper)
     if abs(price_velocity) >= 0.003:  # 0.3% in 1 minute
-        logger.info(f"EXPLOSION detected: velocity={price_velocity*100:.2f}% -> gamma_scalper")
-        return "gamma_scalper"
+        # Check reversal trigger conditions (from backtest analysis)
+        # Rule 1: Score >= 2 AND VIX < 25
+        # Rule 2: Session == midday AND Score >= 1
+        # Rule 3: Score >= 3 (any VIX)
+        should_reverse = False
+        trigger_rule = ""
+
+        if exhaustion_score >= 3:
+            should_reverse = True
+            trigger_rule = "Rule3_ExtremeExhaustion"
+        elif session_phase == "midday" and exhaustion_score >= 1:
+            should_reverse = True
+            trigger_rule = "Rule2_MiddayExhaustion"
+        elif exhaustion_score >= 2 and vix_value < 25:
+            should_reverse = True
+            trigger_rule = "Rule1_NormalExhaustion"
+
+        if should_reverse:
+            logger.info(f"EXHAUSTED EXPLOSION: {trigger_rule}, Score={exhaustion_score}, VIX={vix_value} -> reversal_scalper")
+            return "reversal_scalper"
+        else:
+            logger.info(f"EXPLOSION detected: velocity={price_velocity*100:.2f}% -> gamma_scalper")
+            return "gamma_scalper"
 
     # PRIORITY 3: TRENDING CONDITIONS (new - captures steady moves)
     # Strong trend + low velocity = Delta Surfer's territory
@@ -235,6 +265,8 @@ class OptionStrategyManager:
         price_velocity: float,
         zscore: float,
         adx_value: float = 20.0,
+        exhaustion_score: int = 0,
+        session_phase: str = "unknown",
     ) -> BaseOptionStrategy:
         """
         Select the optimal strategy based on conditions.
@@ -244,15 +276,22 @@ class OptionStrategyManager:
             price_velocity: Recent price velocity
             zscore: Current Z-Score
             adx_value: Current ADX value
+            exhaustion_score: Composite exhaustion score (0-6)
+            session_phase: Current session phase
 
         Returns:
             The selected strategy
         """
-        strategy_name = select_option_strategy(vix_value, price_velocity, zscore, adx_value)
+        strategy_name = select_option_strategy(
+            vix_value, price_velocity, zscore, adx_value,
+            exhaustion_score, session_phase
+        )
 
         # Determine condition for logging
         if strategy_name == "vega_snap":
             new_condition = "PANIC"
+        elif strategy_name == "reversal_scalper":
+            new_condition = "EXHAUSTED"
         elif strategy_name == "delta_surfer":
             new_condition = "TRENDING"
         elif abs(price_velocity) >= 0.003:

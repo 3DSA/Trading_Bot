@@ -1,5 +1,9 @@
 # Bi-Cameral Trading Bot
 
+A multi-strategy algorithmic trading system with separate **equity** and **options** strategy libraries, each with their own hierarchical brain for regime-based routing.
+
+> **Architecture Deep Dive**: See [docs/architecture.md](docs/architecture.md) for detailed documentation on the hierarchical decision tree pattern, strategy sub-routing, and contribution guidelines.
+
 ## Architecture Overview
 
 ```
@@ -17,7 +21,7 @@
 │         │                        │ Detection           │       │
 │         ▼                        ▼                     ▼       │
 │   ┌─────────────────────────────────────────────────────────┐  │
-│   │                    STRATEGY LIBRARY                      │  │
+│   │                  EQUITY STRATEGY LIBRARY                 │  │
 │   │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐     │  │
 │   │  │  momentum    │ │    mean      │ │  volatility  │     │  │
 │   │  │   scalper    │ │  reversion   │ │   breakout   │     │  │
@@ -28,6 +32,16 @@
 │   │                    │    alpha     │                      │  │
 │   │                    │  (CRISIS)    │                      │  │
 │   │                    └──────────────┘                      │  │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                 OPTIONS STRATEGY LIBRARY                 │  │
+│   │           (Brain routes based on VIX/Velocity)           │  │
+│   │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐     │  │
+│   │  │    gamma     │ │    vega      │ │    delta     │     │  │
+│   │  │   scalper    │ │    snap      │ │    surfer    │     │  │
+│   │  │ (EXPLOSIVE)  │ │ (VOL SHIFT)  │ │  (TRENDING)  │     │  │
+│   │  └──────────────┘ └──────────────┘ └──────────────┘     │  │
 │   └─────────────────────────────────────────────────────────┘  │
 │                              │                                  │
 │                              ▼                                  │
@@ -53,7 +67,7 @@
 | `scraper.py` | **Data Collector** - Scrapes Fear & Greed Index, news headlines, market sentiment |
 | `config.json` | **Configuration** - Active strategy, risk parameters, symbol settings |
 
-### Strategy Library (`strategies/`)
+### Equity Strategy Library (`strategies/`)
 
 | Strategy | Regime | Description |
 |----------|--------|-------------|
@@ -61,6 +75,17 @@
 | `mean_reversion.py` | CHOP (ADX < 20) | Z-Score + Bollinger Bands for range-bound markets |
 | `volatility_breakout.py` | VOLATILE | Opening Range Breakout for high volatility / news days |
 | `crisis_alpha.py` | CRISIS (VIX > 25) | Inverse ETF (SQQQ) strategy for bear markets |
+
+### Options Strategy Library (`strategies/options/`)
+
+The options strategies use a hierarchical brain that routes to specialized strategies based on market regime. See [architecture.md](docs/architecture.md) for details.
+
+| Strategy | Market Condition | Edge |
+|----------|------------------|------|
+| `gamma_scalper.py` | Explosive 1-min moves | High gamma exposure captures price acceleration |
+| `vega_snap.py` | Volatility regime changes | Vega exposure profits from IV shifts |
+| `delta_surfer.py` | Sustained trends | Delta exposure rides directional moves |
+| `brain.py` | - | Routes to strategies based on VIX, velocity, z-score, ADX |
 
 ### 3-Layer Regime Detection
 
@@ -162,7 +187,7 @@ Trading_Bot/
 ├── requirements.txt       # Python dependencies
 ├── .env                   # API keys (not in repo)
 │
-├── strategies/            # Strategy library
+├── strategies/            # Equity strategy library
 │   ├── __init__.py
 │   ├── base.py            # Base strategy class
 │   ├── factory.py         # Strategy factory & manager
@@ -172,10 +197,23 @@ Trading_Bot/
 │   ├── volatility_breakout.py
 │   └── crisis_alpha.py
 │
+├── strategies/options/    # Options strategy library
+│   ├── brain.py           # Level 1: Market regime routing
+│   ├── gamma_scalper.py   # Level 2: Explosive moves + exhaustion detection
+│   ├── vega_snap.py       # Level 2: Vol regime changes
+│   └── delta_surfer.py    # Level 2: Trend following
+│
 ├── tests/                 # Backtesting suite
 │   ├── backtest_universal.py   # Main backtester
 │   ├── backtest_scalper.py     # Scalper-specific tests
-│   └── backtest_hybrid.py      # Multi-strategy tests
+│   ├── backtest_hybrid.py      # Multi-strategy tests
+│   └── run_yearly_backtest.py  # Year-by-year options backtester
+│
+├── logs/                  # Trade logs by strategy
+│   └── gamma_scalper/     # Gamma scalper yearly logs
+│
+├── docs/                  # Documentation
+│   └── architecture.md    # Hierarchical strategy architecture
 │
 ├── scripts/               # Shell scripts
 │   ├── start.sh           # Start the bot

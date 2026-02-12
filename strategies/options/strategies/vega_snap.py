@@ -39,7 +39,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-from strategies.options.base_options import (
+from strategies.options.core.base_options import (
     BaseOptionStrategy,
     OptionSignal,
     OptionSignalType,

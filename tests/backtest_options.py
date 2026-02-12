@@ -100,6 +100,16 @@ class OptionTrade:
     velocity_at_entry: float = 0.0
     zscore_at_entry: float = 0.0
 
+    # Exhaustion indicators at entry (for reversal_scalper analysis)
+    rsi_at_entry: float = 50.0
+    volume_ratio_at_entry: float = 1.0
+    cumulative_move_5_at_entry: float = 0.0
+    prior_bar_velocity_at_entry: float = 0.0
+    volume_declining_at_entry: bool = False
+    exhaustion_score_at_entry: int = 0
+    session_phase_at_entry: str = "unknown"
+    bars_in_explosion_at_entry: int = 0
+
 
 @dataclass
 class OptionsBacktestResult:
@@ -200,6 +210,7 @@ class OptionsBacktester:
         if self.brain_mode:
             self.strategies = {
                 "gamma_scalper": get_option_strategy("gamma_scalper"),
+                "reversal_scalper": get_option_strategy("reversal_scalper"),
                 "vega_snap": get_option_strategy("vega_snap"),
                 "delta_surfer": get_option_strategy("delta_surfer"),
             }
@@ -360,41 +371,6 @@ class OptionsBacktester:
         closest_date = matching_dates[-1]
         return float(self.vix_data.loc[closest_date, 'VIX'])
 
-    def _select_strategy(self, velocity: float, zscore: float, vix: float, adx: float = 20.0) -> str:
-        """
-        Brain logic: Select the best strategy for current conditions.
-
-        Priority Order:
-        1. PANIC: Z-Score < -2.5 + VIX elevated -> Vega Snap (rare, high conviction)
-        2. EXPLOSIVE: Velocity > 0.3% -> Gamma Scalper (catch the move)
-        3. TRENDING: ADX > 25 + low velocity -> Delta Surfer (ride the trend)
-        4. DEFAULT: Gamma Scalper (wait for opportunity)
-
-        Args:
-            velocity: Current 1-bar price velocity
-            zscore: Current Z-Score
-            vix: Current VIX level
-            adx: Current ADX value (trend strength)
-
-        Returns:
-            Strategy name to use
-        """
-        # PRIORITY 1: PANIC CONDITIONS -> Vega Snap
-        if vix >= 22 and zscore < -2.5:
-            return "vega_snap"
-
-        # PRIORITY 2: EXPLOSIVE CONDITIONS -> Gamma Scalper
-        if abs(velocity) >= 0.003:  # 0.3% in 1 minute
-            return "gamma_scalper"
-
-        # PRIORITY 3: TRENDING CONDITIONS -> Delta Surfer
-        # Tighter: ADX >= 28 to match strategy's entry threshold
-        if adx >= 28 and abs(velocity) < 0.002:  # Strong trend but not explosive
-            return "delta_surfer"
-
-        # DEFAULT: Gamma Scalper (waiting for explosions)
-        return "gamma_scalper"
-
     def simulate_option_pnl(
         self,
         entry_underlying: float,
@@ -485,8 +461,8 @@ class OptionsBacktester:
         )
 
         if self.brain_mode:
-            result.strategy_distribution = {"gamma_scalper": 0, "vega_snap": 0, "delta_surfer": 0}
-            result.strategy_pnl = {"gamma_scalper": 0.0, "vega_snap": 0.0, "delta_surfer": 0.0}
+            result.strategy_distribution = {"gamma_scalper": 0, "reversal_scalper": 0, "vega_snap": 0, "delta_surfer": 0}
+            result.strategy_pnl = {"gamma_scalper": 0.0, "reversal_scalper": 0.0, "vega_snap": 0.0, "delta_surfer": 0.0}
 
         # Simulation state
         capital = self.initial_capital
@@ -533,13 +509,19 @@ class OptionsBacktester:
             # Get current VIX value (real or fallback)
             current_vix = self.get_vix_for_timestamp(current_time)
 
-            # BRAIN: Select strategy for this bar
+            # Get exhaustion indicators for brain routing
+            exhaustion_score = int(current_row.get("exhaustion_score", 0))
+            session_phase = str(current_row.get("session_phase", "unknown"))
+
+            # BRAIN: Select strategy for this bar (uses canonical logic from brain/router.py)
             if self.brain_mode:
-                current_strategy_name = self._select_strategy(
-                    velocity=velocity,
+                current_strategy_name = select_option_strategy(
+                    vix_value=current_vix,
+                    price_velocity=velocity,
                     zscore=zscore,
-                    vix=current_vix,
-                    adx=adx,
+                    adx_value=adx,
+                    exhaustion_score=exhaustion_score,
+                    session_phase=session_phase,
                 )
 
                 # Track strategy switches
@@ -579,6 +561,26 @@ class OptionsBacktester:
                 )
 
                 pnl_pct = (current_premium - position.entry_premium) / position.entry_premium
+
+                # Update tracking on current_option_position for trailing stops
+                if current_option_position is not None:
+                    # Update highest P&L seen
+                    if pnl_pct * 100 > current_option_position.highest_pnl_pct:
+                        current_option_position.highest_pnl_pct = pnl_pct * 100
+
+                    # Update best underlying price for trailing stops
+                    if position.contract_type == "CALL":
+                        if not hasattr(current_option_position, 'best_underlying_price') or current_option_position.best_underlying_price is None:
+                            current_option_position.best_underlying_price = position.entry_underlying
+                        current_option_position.best_underlying_price = max(
+                            current_option_position.best_underlying_price, current_price
+                        )
+                    else:  # PUT
+                        if not hasattr(current_option_position, 'best_underlying_price') or current_option_position.best_underlying_price is None:
+                            current_option_position.best_underlying_price = position.entry_underlying
+                        current_option_position.best_underlying_price = min(
+                            current_option_position.best_underlying_price, current_price
+                        )
 
                 # Check exit
                 should_exit = False
@@ -643,6 +645,16 @@ class OptionsBacktester:
                         contracts = max(1, int(self.position_size / (contract.mid_price * 100)))
                         option_type = "CALL" if signal.signal == OptionSignalType.BUY_CALL else "PUT"
 
+                        # Get exhaustion indicators from current row
+                        rsi = current_row.get("rsi", 50.0)
+                        volume_ratio = current_row.get("volume_ratio", 1.0)
+                        cumulative_move_5 = current_row.get("cumulative_move_5", 0.0)
+                        prior_bar_velocity = current_row.get("prior_bar_velocity", 0.0)
+                        volume_declining = bool(current_row.get("volume_declining", False))
+                        exhaustion_score = int(current_row.get("exhaustion_score", 0))
+                        session_phase = str(current_row.get("session_phase", "unknown"))
+                        bars_in_explosion = int(current_row.get("bars_in_explosion", 0))
+
                         position = OptionTrade(
                             entry_time=current_time,
                             contract_type=option_type,
@@ -658,6 +670,15 @@ class OptionsBacktester:
                             vix_at_entry=current_vix,
                             velocity_at_entry=velocity,
                             zscore_at_entry=zscore,
+                            # Exhaustion indicators
+                            rsi_at_entry=rsi,
+                            volume_ratio_at_entry=volume_ratio,
+                            cumulative_move_5_at_entry=cumulative_move_5,
+                            prior_bar_velocity_at_entry=prior_bar_velocity,
+                            volume_declining_at_entry=volume_declining,
+                            exhaustion_score_at_entry=exhaustion_score,
+                            session_phase_at_entry=session_phase,
+                            bars_in_explosion_at_entry=bars_in_explosion,
                         )
 
                         current_option_position = OptionPosition(
@@ -669,6 +690,9 @@ class OptionsBacktester:
                             strategy_name=current_strategy_name,
                             signal_reason=signal.reason,
                         )
+                        # Initialize tracking fields for trailing stops
+                        current_option_position.highest_pnl_pct = 0.0
+                        current_option_position.best_underlying_price = current_price
 
                         if verbose:
                             print(f"  [{current_time.strftime('%m/%d %H:%M')}] BUY {option_type} [{current_strategy_name}]")
@@ -799,7 +823,7 @@ class OptionsBacktester:
             print("\n" + "-" * 70)
             print("  PER-STRATEGY PERFORMANCE")
             print("-" * 70)
-            for strat_name in ["gamma_scalper", "vega_snap", "delta_surfer"]:
+            for strat_name in ["gamma_scalper", "reversal_scalper", "vega_snap", "delta_surfer"]:
                 strat_trades = [t for t in result.trades if t.strategy_name == strat_name]
                 if strat_trades:
                     strat_wins = len([t for t in strat_trades if t.pnl > 0])
@@ -849,7 +873,7 @@ def main():
     parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD)")
     parser.add_argument("--strategy", type=str, default=None,
-                        choices=["gamma_scalper", "vega_snap", "delta_surfer"],
+                        choices=["gamma_scalper", "reversal_scalper", "vega_snap", "delta_surfer"],
                         help="Single strategy mode (omit for brain mode)")
     parser.add_argument("--no-real-vix", action="store_true",
                         help="Disable real VIX data (use simulated)")
