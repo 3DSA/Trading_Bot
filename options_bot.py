@@ -36,6 +36,7 @@ import logging
 
 import pandas as pd
 import numpy as np
+import pytz
 import yfinance as yf
 from dotenv import load_dotenv
 
@@ -242,17 +243,27 @@ class OptionsTradingBot:
         try:
             # Fetch real VIX data (^VIX is the actual VIX index)
             vix_ticker = yf.Ticker("^VIX")
+
+            # Try intraday first
             vix_data = vix_ticker.history(period="1d", interval="1m")
 
             if not vix_data.empty:
                 current_vix = float(vix_data["Close"].iloc[-1])
-                logger.debug(f"Fetched real VIX: {current_vix:.2f}")
-                return max(10, min(80, current_vix))  # Clamp to reasonable range
+                logger.info(f"[VIX] Fetched real VIX (intraday): {current_vix:.2f}")
+                return max(10, min(80, current_vix))
 
-            return 20.0  # Default if no data
+            # Fallback to daily data if intraday is empty
+            vix_data = vix_ticker.history(period="5d")
+            if not vix_data.empty:
+                current_vix = float(vix_data["Close"].iloc[-1])
+                logger.info(f"[VIX] Fetched real VIX (daily): {current_vix:.2f}")
+                return max(10, min(80, current_vix))
+
+            logger.warning("[VIX] No VIX data returned from Yahoo Finance")
+            return 20.0
 
         except Exception as e:
-            logger.warning(f"VIX fetch failed: {e}, using default 20.0")
+            logger.warning(f"[VIX] Fetch failed: {e}, using default 20.0")
             return 20.0
 
     def fetch_market_data(self) -> pd.DataFrame:
@@ -261,7 +272,7 @@ class OptionsTradingBot:
             request = StockBarsRequest(
                 symbol_or_symbols=["QQQ"],
                 timeframe=TimeFrame.Minute,
-                start=datetime.now() - timedelta(hours=2),
+                start=datetime.now(pytz.utc) - timedelta(hours=2),
                 limit=self.WARMUP_BARS + 10,
                 feed=DataFeed.SIP,
             )
@@ -492,9 +503,16 @@ class OptionsTradingBot:
             logger.error(f"Trade logging failed: {e}")
 
     def is_trading_time(self, timestamp: datetime) -> bool:
-        """Check if within options trading hours."""
-        hour = timestamp.hour
-        minute = timestamp.minute
+        """Check if within options trading hours (Eastern Time)."""
+        # Convert to Eastern Time
+        eastern = pytz.timezone('America/New_York')
+        if timestamp.tzinfo is None:
+            # Assume UTC if no timezone
+            timestamp = pytz.utc.localize(timestamp)
+        et_time = timestamp.astimezone(eastern)
+
+        hour = et_time.hour
+        minute = et_time.minute
 
         # Market hours: 9:30 AM - 4:00 PM ET
         # Skip first 5 min and last 15 min
@@ -509,7 +527,7 @@ class OptionsTradingBot:
 
     async def run_iteration(self):
         """Run a single iteration of the trading loop."""
-        current_time = datetime.now()
+        current_time = datetime.now(pytz.utc)
 
         # Check trading hours
         if not self.is_trading_time(current_time):
@@ -635,7 +653,7 @@ class OptionsTradingBot:
 
         if self.position:
             pos = self.position
-            time_held = (datetime.now() - pos.entry_time).total_seconds() / 60
+            time_held = (datetime.now(pytz.utc) - pos.entry_time).total_seconds() / 60
             logger.info(f"[POSITION] {pos.contract.option_type.value} ${pos.contract.strike} | "
                        f"Entry: ${pos.entry_price:.2f} | Held: {time_held:.1f} min")
 
@@ -671,9 +689,13 @@ class OptionsTradingBot:
         logger.info("[SHUTDOWN] Closing open positions...")
 
         if self.position is not None:
-            self.execute_exit("SHUTDOWN",
-                             self.prepared_data["gamma_scalper"].iloc[-1]["Close"],
-                             datetime.now())
+            # Get last known price safely
+            gamma_data = self.prepared_data.get("gamma_scalper")
+            if gamma_data is not None and not gamma_data.empty:
+                last_price = gamma_data.iloc[-1]["Close"]
+            else:
+                last_price = self.position.entry_underlying_price  # Fallback to entry price
+            self.execute_exit("SHUTDOWN", last_price, datetime.now(pytz.utc))
 
         logger.info(f"[SHUTDOWN] Session Summary:")
         logger.info(f"  Total Trades: {len(self.trades_today)}")

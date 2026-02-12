@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional, List, Dict
 import math
+import pytz
 
 
 class OptionType(Enum):
@@ -189,7 +190,7 @@ class OptionsAdapter:
         Returns:
             OptionContract if translation successful, None otherwise
         """
-        current_time = current_time or datetime.now()
+        current_time = current_time or datetime.now(pytz.utc)
 
         # Determine option type based on signal
         if symbol.upper() in ["TQQQ", "QQQ"]:

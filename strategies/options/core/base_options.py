@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Tuple
 import pandas as pd
 import numpy as np
+import pytz
 
 
 class OptionType(Enum):
@@ -237,7 +238,7 @@ class BaseOptionStrategy(ABC):
         Returns:
             ContractSpec with estimated Greeks
         """
-        current_time = current_time or datetime.now()
+        current_time = current_time or datetime.now(pytz.utc)
 
         # Calculate strike based on selection
         # QQQ has $1 strike intervals
@@ -483,8 +484,15 @@ class BaseOptionStrategy(ABC):
         - First 5 minutes (erratic pricing)
         - Last 15 minutes (gamma risk)
         """
-        hour = timestamp.hour
-        minute = timestamp.minute
+        # Convert to Eastern Time
+        eastern = pytz.timezone('America/New_York')
+        if timestamp.tzinfo is None:
+            # Assume UTC if no timezone
+            timestamp = pytz.utc.localize(timestamp)
+        et_time = timestamp.astimezone(eastern)
+
+        hour = et_time.hour
+        minute = et_time.minute
 
         # Market hours: 9:30 AM - 4:00 PM ET
         if hour < 9 or (hour == 9 and minute < 35):

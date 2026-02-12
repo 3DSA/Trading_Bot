@@ -239,7 +239,8 @@ class OptionsBacktester:
             end = datetime.strptime(end_date, "%Y-%m-%d")
             print(f"\n[DATA] Fetching QQQ data from {start_date} to {end_date}...")
         else:
-            end = datetime.now()
+            import pytz
+            end = datetime.now(pytz.utc) - timedelta(minutes=16)  # 15min delay for free tier
             start = end - timedelta(days=days)
             print(f"\n[DATA] Fetching {days} days of QQQ minute data...")
 
@@ -358,10 +359,8 @@ class OptionsBacktester:
             return self.vix_fallback
 
         # Get date from timestamp (handling timezone)
-        if timestamp.tzinfo is not None:
-            date = timestamp.tz_localize(None).date()
-        else:
-            date = timestamp.date()
+        # Note: Just use .date() directly - it works for both aware and naive datetimes
+        date = timestamp.date()
 
         # Find the most recent VIX data on or before this date
         matching_dates = self.vix_data.index[self.vix_data.index.date <= date]
@@ -835,11 +834,16 @@ class OptionsBacktester:
         # Trade log
         if result.trades:
             print("\n" + "-" * 70)
-            print("  TRADE LOG (Last 15)")
+            print("  TRADE LOG (Last 15) - Times in EST")
             print("-" * 70)
+            import pytz
+            eastern = pytz.timezone('America/New_York')
             for trade in result.trades[-15:]:
-                entry_str = trade.entry_time.strftime("%m/%d %H:%M")
-                exit_str = trade.exit_time.strftime("%H:%M") if trade.exit_time else "OPEN"
+                # Convert to EST
+                entry_et = trade.entry_time.astimezone(eastern) if trade.entry_time.tzinfo else pytz.utc.localize(trade.entry_time).astimezone(eastern)
+                exit_et = trade.exit_time.astimezone(eastern) if trade.exit_time and trade.exit_time.tzinfo else (pytz.utc.localize(trade.exit_time).astimezone(eastern) if trade.exit_time else None)
+                entry_str = entry_et.strftime("%m/%d %I:%M %p EST")
+                exit_str = exit_et.strftime("%I:%M %p EST") if exit_et else "OPEN"
                 pnl_str = f"${trade.pnl:+,.2f}" if trade.pnl >= 0 else f"${trade.pnl:,.2f}"
                 pnl_pct_str = f"{trade.pnl_pct:+.1f}%"
                 strat_short = trade.strategy_name[:6]

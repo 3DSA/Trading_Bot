@@ -14,6 +14,7 @@ Usage:
 import sys
 from pathlib import Path
 from datetime import datetime
+import pytz
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -23,6 +24,18 @@ from tests.backtest_options import OptionsBacktester, OptionsBacktestResult
 # Base directory for logs
 BASE_DIR = Path(__file__).parent.parent
 LOGS_DIR = BASE_DIR / "logs"
+
+# Timezone for display
+EASTERN = pytz.timezone('America/New_York')
+
+
+def to_est(dt: datetime) -> datetime:
+    """Convert datetime to Eastern Time."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt)
+    return dt.astimezone(EASTERN)
 
 
 def setup_log_directories():
@@ -123,20 +136,20 @@ def write_strategy_trade_logs(year: str, result: OptionsBacktestResult):
                 lines.append(f"    Max Loss: ${max_loss:,.2f}")
                 lines.append(f"    Avg Hold (losses): {avg_loss_hold:.1f} min")
 
-            # Time of day analysis
-            lines.append(f"\n  TIME OF DAY ANALYSIS:")
-            morning_trades = [t for t in strategy_trades if t.entry_time.hour < 12]
-            afternoon_trades = [t for t in strategy_trades if t.entry_time.hour >= 12]
+            # Time of day analysis (in EST)
+            lines.append(f"\n  TIME OF DAY ANALYSIS (EST):")
+            morning_trades = [t for t in strategy_trades if to_est(t.entry_time).hour < 12]
+            afternoon_trades = [t for t in strategy_trades if to_est(t.entry_time).hour >= 12]
 
             if morning_trades:
                 morning_pnl = sum(t.pnl for t in morning_trades)
                 morning_wr = len([t for t in morning_trades if t.pnl > 0]) / len(morning_trades) * 100
-                lines.append(f"    Morning (before 12 UTC): {len(morning_trades)} trades, ${morning_pnl:+,.2f}, {morning_wr:.1f}% WR")
+                lines.append(f"    Morning (before 12 PM EST): {len(morning_trades)} trades, ${morning_pnl:+,.2f}, {morning_wr:.1f}% WR")
 
             if afternoon_trades:
                 afternoon_pnl = sum(t.pnl for t in afternoon_trades)
                 afternoon_wr = len([t for t in afternoon_trades if t.pnl > 0]) / len(afternoon_trades) * 100
-                lines.append(f"    Afternoon (12+ UTC): {len(afternoon_trades)} trades, ${afternoon_pnl:+,.2f}, {afternoon_wr:.1f}% WR")
+                lines.append(f"    Afternoon (12 PM+ EST): {len(afternoon_trades)} trades, ${afternoon_pnl:+,.2f}, {afternoon_wr:.1f}% WR")
 
             # Day of week analysis
             lines.append(f"\n  DAY OF WEEK ANALYSIS:")
@@ -203,9 +216,11 @@ def write_strategy_trade_logs(year: str, result: OptionsBacktestResult):
             lines.append("=" * 100)
 
             for i, trade in enumerate(strategy_trades, 1):
+                entry_et = to_est(trade.entry_time)
+                exit_et = to_est(trade.exit_time)
                 lines.append(f"\n  --- TRADE #{i} ---")
-                lines.append(f"  Entry Time: {trade.entry_time.strftime('%Y-%m-%d %H:%M:%S')} ({trade.entry_time.strftime('%A')})")
-                lines.append(f"  Exit Time:  {trade.exit_time.strftime('%Y-%m-%d %H:%M:%S') if trade.exit_time else 'OPEN'}")
+                lines.append(f"  Entry Time: {entry_et.strftime('%Y-%m-%d %I:%M:%S %p EST')} ({entry_et.strftime('%A')})")
+                lines.append(f"  Exit Time:  {exit_et.strftime('%Y-%m-%d %I:%M:%S %p EST') if exit_et else 'OPEN'}")
                 lines.append(f"  Hold Duration: {trade.hold_minutes:.1f} minutes")
                 lines.append(f"  ")
                 lines.append(f"  Contract: {trade.contract_type} ${trade.strike:.0f}")
@@ -420,13 +435,15 @@ def generate_strategy_summary(results):
             lines.append(f"\n  TOP 10 WORST TRADES:")
             worst_trades = sorted(all_trades, key=lambda t: t.pnl)[:10]
             for i, trade in enumerate(worst_trades, 1):
-                lines.append(f"    {i}. {trade.entry_time.strftime('%Y-%m-%d %H:%M')} | {trade.contract_type} ${trade.strike:.0f} | ${trade.pnl:,.2f} | {trade.exit_reason[:40]}")
+                entry_et = to_est(trade.entry_time)
+                lines.append(f"    {i}. {entry_et.strftime('%Y-%m-%d %I:%M %p EST')} | {trade.contract_type} ${trade.strike:.0f} | ${trade.pnl:,.2f} | {trade.exit_reason[:40]}")
 
             # Best trades
             lines.append(f"\n  TOP 10 BEST TRADES:")
             best_trades = sorted(all_trades, key=lambda t: t.pnl, reverse=True)[:10]
             for i, trade in enumerate(best_trades, 1):
-                lines.append(f"    {i}. {trade.entry_time.strftime('%Y-%m-%d %H:%M')} | {trade.contract_type} ${trade.strike:.0f} | ${trade.pnl:+,.2f} | {trade.exit_reason[:40]}")
+                entry_et = to_est(trade.entry_time)
+                lines.append(f"    {i}. {entry_et.strftime('%Y-%m-%d %I:%M %p EST')} | {trade.contract_type} ${trade.strike:.0f} | ${trade.pnl:+,.2f} | {trade.exit_reason[:40]}")
 
             # Pattern analysis - losing streaks
             lines.append(f"\n  LOSING STREAK ANALYSIS:")

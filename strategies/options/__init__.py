@@ -9,7 +9,8 @@ Hierarchical Decision Tree Architecture:
 │                                                                              │
 │  LEVEL 1: BRAIN (Market Regime Detection)                                   │
 │  ├── brain/router.py                                                        │
-│  │   └── select_option_strategy(vix, velocity, zscore, adx)                │
+│  │   └── select_option_strategy(vix, velocity, zscore, adx) scp -i $KEY strategies/options/brain/router.py $SERVER:$REMOTE_DIR/strategies/options/brain/
+               │
 │  │                                                                          │
 │  └── Routes to:                                                             │
 │      ├── PANIC (VIX >= 22, Z < -2.5) ────────────> Vega Snap               │
