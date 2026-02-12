@@ -27,7 +27,7 @@ LOGS_DIR = BASE_DIR / "logs"
 
 def setup_log_directories():
     """Create log directories for each strategy."""
-    strategies = ["gamma_scalper", "vega_snap", "delta_surfer"]
+    strategies = ["gamma_scalper", "reversal_scalper", "vega_snap", "delta_surfer"]
     for strategy in strategies:
         log_dir = LOGS_DIR / strategy
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -40,7 +40,7 @@ def write_strategy_trade_logs(year: str, result: OptionsBacktestResult):
 
     Creates logs/{strategy}/{year}.log with full trade details.
     """
-    strategies = ["gamma_scalper", "vega_snap", "delta_surfer"]
+    strategies = ["gamma_scalper", "reversal_scalper", "vega_snap", "delta_surfer"]
 
     for strategy_name in strategies:
         # Filter trades for this strategy
@@ -163,6 +163,40 @@ def write_strategy_trade_logs(year: str, result: OptionsBacktestResult):
                 put_wr = len([t for t in put_trades if t.pnl > 0]) / len(put_trades) * 100
                 lines.append(f"    PUTS: {len(put_trades)} trades, ${put_pnl:+,.2f}, {put_wr:.1f}% WR")
 
+            # Exhaustion score analysis (for reversal_scalper insights)
+            lines.append(f"\n  EXHAUSTION SCORE ANALYSIS:")
+            # Group trades by exhaustion score
+            for score in range(7):  # 0-6
+                score_trades = [t for t in strategy_trades if getattr(t, 'exhaustion_score_at_entry', 0) == score]
+                if score_trades:
+                    score_pnl = sum(t.pnl for t in score_trades)
+                    score_wins = len([t for t in score_trades if t.pnl > 0])
+                    score_wr = score_wins / len(score_trades) * 100
+                    lines.append(f"    Score {score}: {len(score_trades)} trades, ${score_pnl:+,.2f}, {score_wr:.1f}% WR")
+
+            # High exhaustion (score >= 3) vs low exhaustion analysis
+            high_exh_trades = [t for t in strategy_trades if getattr(t, 'exhaustion_score_at_entry', 0) >= 3]
+            low_exh_trades = [t for t in strategy_trades if getattr(t, 'exhaustion_score_at_entry', 0) < 3]
+
+            if high_exh_trades:
+                high_pnl = sum(t.pnl for t in high_exh_trades)
+                high_wr = len([t for t in high_exh_trades if t.pnl > 0]) / len(high_exh_trades) * 100
+                lines.append(f"    HIGH EXHAUSTION (>=3): {len(high_exh_trades)} trades, ${high_pnl:+,.2f}, {high_wr:.1f}% WR")
+
+            if low_exh_trades:
+                low_pnl = sum(t.pnl for t in low_exh_trades)
+                low_wr = len([t for t in low_exh_trades if t.pnl > 0]) / len(low_exh_trades) * 100
+                lines.append(f"    LOW EXHAUSTION (<3): {len(low_exh_trades)} trades, ${low_pnl:+,.2f}, {low_wr:.1f}% WR")
+
+            # Session phase analysis
+            lines.append(f"\n  SESSION PHASE ANALYSIS:")
+            for phase in ["open_drive", "midday", "close_drive"]:
+                phase_trades = [t for t in strategy_trades if getattr(t, 'session_phase_at_entry', '') == phase]
+                if phase_trades:
+                    phase_pnl = sum(t.pnl for t in phase_trades)
+                    phase_wr = len([t for t in phase_trades if t.pnl > 0]) / len(phase_trades) * 100
+                    lines.append(f"    {phase}: {len(phase_trades)} trades, ${phase_pnl:+,.2f}, {phase_wr:.1f}% WR")
+
             # Detailed trade log
             lines.append("\n" + "=" * 100)
             lines.append("  DETAILED TRADE LOG")
@@ -190,6 +224,26 @@ def write_strategy_trade_logs(year: str, result: OptionsBacktestResult):
                 lines.append(f"    VIX: {trade.vix_at_entry:.1f}")
                 lines.append(f"    Velocity: {trade.velocity_at_entry * 100:.3f}%")
                 lines.append(f"    Z-Score: {trade.zscore_at_entry:.2f}")
+                lines.append(f"  ")
+                # Exhaustion indicators (for reversal_scalper analysis)
+                rsi = getattr(trade, 'rsi_at_entry', 50.0)
+                vol_ratio = getattr(trade, 'volume_ratio_at_entry', 1.0)
+                cum_move = getattr(trade, 'cumulative_move_5_at_entry', 0.0)
+                prior_vel = getattr(trade, 'prior_bar_velocity_at_entry', 0.0)
+                vol_declining = getattr(trade, 'volume_declining_at_entry', False)
+                exh_score = getattr(trade, 'exhaustion_score_at_entry', 0)
+                session = getattr(trade, 'session_phase_at_entry', 'unknown')
+                bars_expl = getattr(trade, 'bars_in_explosion_at_entry', 0)
+
+                lines.append(f"  Exhaustion Indicators:")
+                lines.append(f"    RSI: {rsi:.1f}")
+                lines.append(f"    Volume Ratio: {vol_ratio:.1f}x")
+                lines.append(f"    Cumulative Move (5 bars): {cum_move * 100:.2f}%")
+                lines.append(f"    Prior Bar Velocity: {prior_vel * 100:.3f}%")
+                lines.append(f"    Volume Declining: {vol_declining}")
+                lines.append(f"    Exhaustion Score: {exh_score}/6")
+                lines.append(f"    Session Phase: {session}")
+                lines.append(f"    Bars in Explosion: {bars_expl}")
                 lines.append(f"  ")
                 lines.append(f"  Entry Reason: {trade.entry_reason}")
                 lines.append(f"  Exit Reason:  {trade.exit_reason}")
@@ -277,7 +331,7 @@ def run_yearly_backtests():
 def generate_strategy_summary(results):
     """Generate a summary file for each strategy across all years."""
 
-    strategies = ["gamma_scalper", "vega_snap", "delta_surfer"]
+    strategies = ["gamma_scalper", "reversal_scalper", "vega_snap", "delta_surfer"]
 
     for strategy_name in strategies:
         summary_path = LOGS_DIR / strategy_name / "summary_all_years.log"
@@ -490,7 +544,7 @@ def generate_report(results):
 
         # Per-Strategy Performance
         lines.append("\n  PER-STRATEGY PERFORMANCE:")
-        for strat_name in ["gamma_scalper", "vega_snap", "delta_surfer"]:
+        for strat_name in ["gamma_scalper", "reversal_scalper", "vega_snap", "delta_surfer"]:
             strat_trades = [t for t in result.trades if t.strategy_name == strat_name]
             if strat_trades:
                 strat_wins = len([t for t in strat_trades if t.pnl > 0])

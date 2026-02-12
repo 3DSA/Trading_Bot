@@ -38,7 +38,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-from strategies.options.base_options import (
+from strategies.options.core.base_options import (
     BaseOptionStrategy,
     OptionSignal,
     OptionSignalType,
@@ -107,6 +107,13 @@ class GammaScalperStrategy(BaseOptionStrategy):
         - Volume ratio: Current / 20-period average
         - ATR: To validate move significance
         - RSI: To avoid exhausted moves
+
+        Exhaustion indicators (for reversal_scalper routing):
+        - cumulative_move_5: Total move over last 5 bars (late entry detection)
+        - bars_since_explosion: How long since velocity first exceeded threshold
+        - volume_declining: Whether volume is fading during the move
+        - prior_bar_velocity: Previous bar's velocity (momentum building vs reversal)
+        - session_phase: open_drive, midday, close_drive
         """
         df = df.copy()
 
@@ -139,6 +146,76 @@ class GammaScalperStrategy(BaseOptionStrategy):
         # EMA for trend context (not for entry, just info)
         df["ema_9"] = df["Close"].ewm(span=9, adjust=False).mean()
         df["ema_21"] = df["Close"].ewm(span=21, adjust=False).mean()
+
+        # =============================================================================
+        # NEW: Exhaustion Detection Variables (for reversal_scalper routing)
+        # =============================================================================
+
+        # 1. CUMULATIVE MOVE: Total move over last 5 bars
+        # If price has already moved significantly, we're catching the end not the start
+        df["cumulative_move_5"] = df["Close"].pct_change(periods=5)
+
+        # 2. PRIOR BAR BEHAVIOR: What happened before this bar
+        df["prior_bar_velocity"] = df["velocity"].shift(1)
+        df["prior_bar_direction"] = np.sign(df["velocity"].shift(1))
+
+        # Check if prior bar was also explosive in same direction (momentum building)
+        # vs opposite direction (potential reversal forming)
+        df["momentum_building"] = (
+            (df["velocity"] > 0) & (df["prior_bar_velocity"] > self.VELOCITY_THRESHOLD / 2)
+        ) | (
+            (df["velocity"] < 0) & (df["prior_bar_velocity"] < -self.VELOCITY_THRESHOLD / 2)
+        )
+
+        # 3. VOLUME PATTERN: Is volume increasing or declining during the move
+        df["prior_volume_ratio"] = df["volume_ratio"].shift(1)
+        df["volume_declining"] = df["volume_ratio"] < df["prior_volume_ratio"]
+
+        # High volume often precedes reversals (exhaustion volume)
+        df["exhaustion_volume"] = df["volume_ratio"] >= 8.0
+
+        # 4. BARS SINCE EXPLOSION START
+        # Track how many consecutive bars have had elevated velocity
+        explosion_active = df["velocity_abs"] >= self.VELOCITY_THRESHOLD / 2
+        df["bars_in_explosion"] = explosion_active.groupby(
+            (~explosion_active).cumsum()
+        ).cumsum()
+
+        # 5. SESSION PHASE: Different behavior at different times
+        # open_drive (9:30-10:00): More continuation
+        # midday (10:00-14:30): More chop/reversal
+        # close_drive (14:30-16:00): More directional
+        def get_session_phase(timestamp):
+            if hasattr(timestamp, 'hour'):
+                hour = timestamp.hour
+                minute = timestamp.minute
+                time_minutes = hour * 60 + minute
+
+                # Market hours in Eastern Time (assuming data is in ET)
+                if time_minutes < 570:  # Before 9:30
+                    return "pre_market"
+                elif time_minutes < 600:  # 9:30-10:00
+                    return "open_drive"
+                elif time_minutes < 870:  # 10:00-14:30
+                    return "midday"
+                elif time_minutes < 960:  # 14:30-16:00
+                    return "close_drive"
+                else:
+                    return "after_hours"
+            return "unknown"
+
+        df["session_phase"] = df.index.map(get_session_phase)
+
+        # 6. EXHAUSTION SCORE: Composite score for reversal likelihood
+        # Higher score = more likely to reverse (good for reversal_scalper)
+        df["exhaustion_score"] = (
+            (df["rsi"] >= 65).astype(int) * 1 +  # RSI overbought
+            (df["rsi"] <= 35).astype(int) * 1 +  # RSI oversold
+            (df["cumulative_move_5"].abs() >= 0.01).astype(int) * 1 +  # Big cumulative move
+            df["exhaustion_volume"].astype(int) * 1 +  # High volume
+            df["volume_declining"].astype(int) * 1 +  # Volume fading
+            (df["bars_in_explosion"] >= 3).astype(int) * 1  # Late to the move
+        )
 
         # Forward fill and drop NaN
         df.ffill(inplace=True)

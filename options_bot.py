@@ -7,7 +7,12 @@ that was backtested with 2.5-4.8 profit factor across 2024-2026.
 
 Brain Strategy Selection (Priority Order):
     1. PANIC: VIX >= 22 AND Z-Score < -2.5 -> Vega Snap
-    2. EXPLOSIVE: Velocity >= 0.3% in 1 min -> Gamma Scalper
+    2. EXPLOSIVE: Velocity >= 0.3% in 1 min -> Gamma Scalper OR Reversal Scalper
+       - Exhaustion Routing (within EXPLOSIVE):
+         * Rule 1: exhaustion_score >= 2 AND VIX < 25 -> Reversal Scalper
+         * Rule 2: session_phase == "midday" AND exhaustion_score >= 1 -> Reversal Scalper
+         * Rule 3: exhaustion_score >= 3 (any VIX) -> Reversal Scalper
+         * Otherwise -> Gamma Scalper (ride explosions)
     3. TRENDING: ADX >= 28 AND Velocity < 0.2% -> Delta Surfer
     4. DEFAULT: Gamma Scalper (wait for explosions)
 
@@ -31,6 +36,7 @@ import logging
 
 import pandas as pd
 import numpy as np
+import yfinance as yf
 from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
@@ -166,6 +172,7 @@ class OptionsTradingBot:
         # Load ALL strategies (same as backtest)
         self.strategies = {
             "gamma_scalper": get_option_strategy("gamma_scalper"),
+            "reversal_scalper": get_option_strategy("reversal_scalper"),
             "vega_snap": get_option_strategy("vega_snap"),
             "delta_surfer": get_option_strategy("delta_surfer"),
         }
@@ -227,55 +234,22 @@ class OptionsTradingBot:
         """)
         self.db_conn.commit()
 
-    def _select_strategy(self, velocity: float, zscore: float, vix: float, adx: float) -> str:
-        """
-        EXACT same brain logic as backtest.
-
-        Priority Order:
-        1. PANIC: Z-Score < -2.5 + VIX elevated -> Vega Snap
-        2. EXPLOSIVE: Velocity > 0.3% -> Gamma Scalper
-        3. TRENDING: ADX >= 28 + low velocity -> Delta Surfer
-        4. DEFAULT: Gamma Scalper
-        """
-        # PRIORITY 1: PANIC CONDITIONS -> Vega Snap
-        if vix >= 22 and zscore < -2.5:
-            return "vega_snap"
-
-        # PRIORITY 2: EXPLOSIVE CONDITIONS -> Gamma Scalper
-        if abs(velocity) >= 0.003:  # 0.3% in 1 minute
-            return "gamma_scalper"
-
-        # PRIORITY 3: TRENDING CONDITIONS -> Delta Surfer
-        if adx >= 28 and abs(velocity) < 0.002:
-            return "delta_surfer"
-
-        # DEFAULT: Gamma Scalper (waiting for explosions)
-        return "gamma_scalper"
-
     def fetch_vix(self) -> float:
-        """Fetch current VIX level."""
+        """Fetch current VIX level from Yahoo Finance."""
         if self.vix_override is not None:
             return self.vix_override
 
         try:
-            # Fetch VIX data (VIXY as proxy since VIX itself isn't tradeable)
-            request = StockBarsRequest(
-                symbol_or_symbols=["UVXY"],  # VIX proxy ETF
-                timeframe=TimeFrame.Minute,
-                start=datetime.now() - timedelta(minutes=5),
-                limit=1,
-                feed=DataFeed.SIP,
-            )
-            bars = self.data_client.get_stock_bars(request)
+            # Fetch real VIX data (^VIX is the actual VIX index)
+            vix_ticker = yf.Ticker("^VIX")
+            vix_data = vix_ticker.history(period="1d", interval="1m")
 
-            if "UVXY" in bars.data and bars.data["UVXY"]:
-                # UVXY price roughly correlates to VIX
-                uvxy_price = float(bars.data["UVXY"][-1].close)
-                # Rough approximation: UVXY ~= VIX * 0.8 for current levels
-                estimated_vix = uvxy_price * 1.25
-                return max(12, min(80, estimated_vix))  # Clamp to reasonable range
+            if not vix_data.empty:
+                current_vix = float(vix_data["Close"].iloc[-1])
+                logger.debug(f"Fetched real VIX: {current_vix:.2f}")
+                return max(10, min(80, current_vix))  # Clamp to reasonable range
 
-            return 20.0  # Default
+            return 20.0  # Default if no data
 
         except Exception as e:
             logger.warning(f"VIX fetch failed: {e}, using default 20.0")
@@ -317,13 +291,15 @@ class OptionsTradingBot:
         for name, strategy in self.strategies.items():
             self.prepared_data[name] = strategy.prepare_data(df.copy())
 
-    def get_market_indicators(self, i: int) -> Dict[str, float]:
+    def get_market_indicators(self, i: int) -> Dict[str, any]:
         """Get current market indicators for brain decisions."""
         indicators = {
             "velocity": 0.0,
             "zscore": 0.0,
             "adx": 20.0,
             "price": 0.0,
+            "exhaustion_score": 0,
+            "session_phase": "unknown",
         }
 
         # Get from gamma_scalper data (primary)
@@ -332,6 +308,9 @@ class OptionsTradingBot:
             row = gamma_df.iloc[i]
             indicators["price"] = row.get("Close", 0)
             indicators["velocity"] = row.get("velocity", 0)
+            # Get exhaustion indicators for reversal routing
+            indicators["exhaustion_score"] = int(row.get("exhaustion_score", 0))
+            indicators["session_phase"] = str(row.get("session_phase", "unknown"))
 
         # Get zscore from vega_snap data
         vega_df = self.prepared_data.get("vega_snap")
@@ -556,12 +535,14 @@ class OptionsTradingBot:
         # Get market indicators
         indicators = self.get_market_indicators(i)
 
-        # BRAIN: Select strategy
-        self.current_strategy_name = self._select_strategy(
-            velocity=indicators["velocity"],
+        # BRAIN: Select strategy (uses canonical logic from brain/router.py)
+        self.current_strategy_name = select_option_strategy(
+            vix_value=self.current_vix,
+            price_velocity=indicators["velocity"],
             zscore=indicators["zscore"],
-            vix=self.current_vix,
-            adx=indicators["adx"],
+            adx_value=indicators["adx"],
+            exhaustion_score=indicators["exhaustion_score"],
+            session_phase=indicators["session_phase"],
         )
 
         # Track strategy switches

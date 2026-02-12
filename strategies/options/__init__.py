@@ -1,17 +1,48 @@
 """
 Options-Native Strategy Library
 
+Hierarchical Decision Tree Architecture:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        OPTIONS STRATEGY TREE                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  LEVEL 1: BRAIN (Market Regime Detection)                                   │
+│  ├── brain/router.py                                                        │
+│  │   └── select_option_strategy(vix, velocity, zscore, adx)                │
+│  │                                                                          │
+│  └── Routes to:                                                             │
+│      ├── PANIC (VIX >= 22, Z < -2.5) ────────────> Vega Snap               │
+│      ├── EXPLOSIVE (Velocity >= 0.3%) ───────────> Gamma Scalper           │
+│      ├── TRENDING (ADX >= 28, low vel) ──────────> Delta Surfer            │
+│      └── DEFAULT ────────────────────────────────> Gamma Scalper (wait)    │
+│                                                                              │
+│  LEVEL 2: STRATEGIES (Specialized for market conditions)                    │
+│  ├── strategies/gamma/          <- Has Level 3 sub-routing                 │
+│  │   ├── scalper.py             <- Ride explosions                         │
+│  │   └── reversal.py            <- Fade exhausted moves                    │
+│  │                                                                          │
+│  ├── strategies/vega_snap.py    <- Panic reversals                         │
+│  └── strategies/delta_surfer.py <- Trend following                         │
+│                                                                              │
+│  LEVEL 3: SUB-STRATEGIES (Strategy-specific routing)                        │
+│  └── strategies/gamma/                                                      │
+│      └── Exhaustion Score triggers reversal_scalper                        │
+│          - Rule 1: Score >= 2 AND VIX < 25                                 │
+│          - Rule 2: Session == midday AND Score >= 1                        │
+│          - Rule 3: Score >= 3 (any VIX)                                    │
+│                                                                              │
+│  CORE: Shared base classes and types                                        │
+│  └── core/base_options.py                                                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
 These strategies are designed specifically for options physics:
 - Time is TOXIC (Theta decay)
 - Convexity is POWER (Gamma acceleration)
 - Volatility is TREACHEROUS (Vega crush/expansion)
 
 DO NOT use stock strategies to trade options. Different physics.
-
-Strategies:
-    - GammaScalper: Captures explosive moves (replaces momentum)
-    - VegaSnap: Captures panic reversals (replaces mean reversion)
-    - DeltaSurfer: Rides steady trends with deep ITM options
 
 Usage:
     from strategies.options import get_option_strategy, GammaScalperStrategy
@@ -28,7 +59,8 @@ Usage:
 Author: Bi-Cameral Quant Team
 """
 
-from strategies.options.base_options import (
+# Core components
+from strategies.options.core.base_options import (
     BaseOptionStrategy,
     OptionSignal,
     OptionSignalType,
@@ -37,10 +69,15 @@ from strategies.options.base_options import (
     ContractSelection,
     OptionPosition,
 )
-from strategies.options.gamma_scalper import GammaScalperStrategy
-from strategies.options.vega_snap import VegaSnapStrategy
-from strategies.options.delta_surfer import DeltaSurferStrategy
-from strategies.options.factory import (
+
+# Level 2 Strategies
+from strategies.options.strategies.gamma.scalper import GammaScalperStrategy
+from strategies.options.strategies.gamma.reversal import ReversalScalperStrategy
+from strategies.options.strategies.vega_snap import VegaSnapStrategy
+from strategies.options.strategies.delta_surfer import DeltaSurferStrategy
+
+# Level 1 Brain (Router)
+from strategies.options.brain.router import (
     get_option_strategy,
     get_option_strategy_for_condition,
     list_option_strategies,
@@ -51,7 +88,7 @@ from strategies.options.factory import (
 )
 
 __all__ = [
-    # Base classes
+    # Core classes
     "BaseOptionStrategy",
     "OptionSignal",
     "OptionSignalType",
@@ -59,11 +96,12 @@ __all__ = [
     "OptionType",
     "ContractSelection",
     "OptionPosition",
-    # Strategies
+    # Level 2 Strategies
     "GammaScalperStrategy",
+    "ReversalScalperStrategy",
     "VegaSnapStrategy",
     "DeltaSurferStrategy",
-    # Factory functions
+    # Level 1 Brain functions
     "get_option_strategy",
     "get_option_strategy_for_condition",
     "list_option_strategies",
